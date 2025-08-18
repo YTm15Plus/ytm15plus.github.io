@@ -1,4 +1,4 @@
-// player.js — corrige "loading infinito" e troca de qualidade progressiva
+// player.js — corrige "loading infinito" + mantém caixa de qualidade aberta ao trocar
 
 const video = document.createElement("video");
 video.setAttribute("controls", "");
@@ -311,7 +311,6 @@ function showSpinner() {
   }
   if (spinnerTimer) clearTimeout(spinnerTimer);
   spinnerTimer = setTimeout(() => {
-    // failsafe: se não carregou metadados até aqui, mostra erro
     if (video.readyState < 1) {
       videoPlayer.classList.add("player-has-error");
       playerError.textContent = `The video failed to load
@@ -329,46 +328,43 @@ function hideSpinner() {
 }
 
 controlsBG.onclick = function(){
-if (!controlsVisible) {
-controlsVisible = true;
-controlsOverlay.classList.add("controls-visible");
-if (coTimO) clearTimeout(coTimO);
-coTimO = setTimeout(function(){
-controlsVisible = false;
-controlsOverlay.classList.remove("controls-visible");
-}, 4000);
+  if (!controlsVisible) {
+    controlsVisible = true;
+    controlsOverlay.classList.add("controls-visible");
+    if (coTimO) clearTimeout(coTimO);
+    coTimO = setTimeout(function(){
+      controlsVisible = false;
+      controlsOverlay.classList.remove("controls-visible");
+    }, 4000);
 
-video.addEventListener("playing", function(){
-if (!videoPlayer.classList.contains("dbl-tap-seek-mode")) {
-if (coTimO) clearTimeout(coTimO);
-coTimO = setTimeout(function(){
-controlsVisible = false;
-controlsOverlay.classList.remove("controls-visible");
-}, 4000);
-};
-}, {once:true});
+    video.addEventListener("playing", function(){
+      if (!videoPlayer.classList.contains("dbl-tap-seek-mode")) {
+        if (coTimO) clearTimeout(coTimO);
+        coTimO = setTimeout(function(){
+          controlsVisible = false;
+          controlsOverlay.classList.remove("controls-visible");
+        }, 4000);
+      };
+    }, {once:true});
 
-video.addEventListener("pause", function(){
-if (!videoPlayer.classList.contains("dbl-tap-seek-mode")) {
-if (coTimO) clearTimeout(coTimO);
-};
-}, {once:true});
+    video.addEventListener("pause", function(){
+      if (!videoPlayer.classList.contains("dbl-tap-seek-mode")) {
+        if (coTimO) clearTimeout(coTimO);
+      };
+    }, {once:true});
 
-} else if (controlsVisible) {
-controlsVisible = false;
-controlsOverlay.classList.remove("controls-visible");
-if (coTimO) clearTimeout(coTimO);
-}
+  } else if (controlsVisible) {
+    controlsVisible = false;
+    controlsOverlay.classList.remove("controls-visible");
+    if (coTimO) clearTimeout(coTimO);
+  }
 };
 
 function togglePlay() {
   if (video.paused || video.ended) {
     const p = video.play();
     if (p && typeof p.then === "function") {
-      p.then(()=>hideSpinner()).catch(()=>{ // autoplay bloqueado? tudo bem.
-        hideSpinner();
-        updateToggleButton();
-      });
+      p.then(()=>hideSpinner()).catch(()=>{ hideSpinner(); updateToggleButton(); });
     }
   } else {
     video.pause();
@@ -619,6 +615,9 @@ function openPlayerDialogMisc(){
   playerOptDialog.id = "playerDialogMisc";
 };
 
+/* ======= flag para não fechar a caixa ao trocar qualidade ======= */
+let isSwitchingQuality = false;
+
 /* ======= TROCA DE QUALIDADE (progressivo) ======= */
 async function switchQuality(targetUrl, targetLabel) {
   const wasPlaying = !video.paused && !video.ended;
@@ -630,6 +629,7 @@ async function switchQuality(targetUrl, targetLabel) {
   });
 
   try { video.pause(); } catch(e){}
+  isSwitchingQuality = true;            // <- evita fechar o diálogo no loadstart
   showSpinner();
 
   video.src = targetUrl;
@@ -662,6 +662,9 @@ async function switchQuality(targetUrl, targetLabel) {
   hideSpinner();
   playerTitle.innerText = video.dataset.title || '';
   updateToggleButton();
+
+  // mantém a caixa aberta (não fechar aqui)
+  setTimeout(()=>{ isSwitchingQuality = false; }, 0);
 }
 
 function openPlayerDialogQual(){
@@ -742,7 +745,7 @@ video.addEventListener("loadedmetadata", () => { hideSpinner(); handleDurationCh
 video.addEventListener("canplay", () => { hideSpinner(); });
 video.addEventListener("canplaythrough", () => { hideSpinner(); });
 video.addEventListener("suspend", () => { hideSpinner(); });
-video.addEventListener("stalled", () => { /* pode manter spinner, mas não infinito */ });
+video.addEventListener("stalled", () => { /* mantém estado */ });
 
 video.addEventListener("error", function(){
   hideSpinner();
@@ -776,11 +779,14 @@ video.addEventListener("loadstart", function(){
   videoPlayer.classList.remove("player-started");
   videoPlayer.classList.remove("player-has-error");
   playerTitle.innerHTML = video.dataset.title || "";
-  videoPlayer.classList.remove("player-options-shown");
+  // NÃO feche as opções/diálogo ao trocar qualidade
+  if (!isSwitchingQuality) {
+    videoPlayer.classList.remove("player-options-shown");
+    closePlayerDialog();
+  }
   videoPlayer.classList.remove("player-mini-mode");
   videoPlayer.classList.remove("hide-prev-next-btns");
   closeIFramePlayer();
-  closePlayerDialog();
 });
 video.addEventListener("waiting", function(){ showSpinner(); });
 video.addEventListener("playing", function() {
@@ -868,10 +874,7 @@ Sorry about that...`;
         try { video.load(); } catch(e){}
         const p = video.play();
         if (p && typeof p.then === "function") {
-          p.then(()=>hideSpinner()).catch(()=>{ // autoplay pode ser bloqueado
-            hideSpinner();
-            updateToggleButton();
-          });
+          p.then(()=>hideSpinner()).catch(()=>{ hideSpinner(); updateToggleButton(); });
         } else {
           hideSpinner();
         }
@@ -888,4 +891,3 @@ Sorry about that...`;
 
 /* expõe para o app */
 window.insertYTmPlayer = window.insertYTmPlayer || insertYTmPlayer;
-
