@@ -1,4 +1,4 @@
-// player.js — suporte a HLS + correções do diálogo de qualidade e loading
+// player.js — completo, com correções de Quality + HLS + failsafe de loading
 
 /***************
  * Setup base
@@ -325,9 +325,9 @@ let isSwitchingQuality = false;
 let shouldKeepOptionsOpen = false;
 let restoreDialogId = "";
 
-let hls = null;              // instância hls.js (se usada)
-let isUsingHls = false;      // estamos em HLS?
-let hlsManifestUrl = "";     // URL m3u8 (se houver)
+let hls = null;
+let isUsingHls = false;
+let hlsManifestUrl = "";
 
 /* Spinner failsafe */
 const SPINNER_FAILSAFE_MS = 12000;
@@ -371,6 +371,7 @@ controlsBG.onclick = function () {
 
 /* vídeo básico */
 function togglePlay() {
+  if (videoPlayer.classList.contains("player-options-shown") || playerOptDialog.hasAttribute("open")) return;
   if (video.paused || video.ended) {
     const p = video.play();
     if (p && typeof p.then === "function") {
@@ -516,13 +517,12 @@ controlsBG.addEventListener("click", function (e) {
  ***************/
 function openPlayerOptions(e) {
   if (e) { e.stopPropagation(); e.preventDefault(); }
-  // garante que clique não acerte o <video>
   video.style.pointerEvents = "none";
   videoPlayer.classList.add("player-options-shown");
 }
 function hidePlayerOptions() {
   videoPlayer.classList.remove("player-options-shown");
-  video.style.pointerEvents = ""; // volta normal
+  video.style.pointerEvents = "";
   closePlayerDialog();
 }
 function openPlayerDialog() { playerOptDialog.setAttribute("open", ""); }
@@ -545,9 +545,8 @@ function openPlayerDialogMisc() {
   playerOptDialog.id = "playerDialogMisc";
 }
 
-/* manter aberto ao trocar qualidade */
+/* manter opções/diálogo sempre visíveis enquanto troca */
 function ensureOptionsOpen() {
-  if (!shouldKeepOptionsOpen) return;
   videoPlayer.classList.add("player-options-shown");
   video.style.pointerEvents = "none";
   if (!playerOptDialog.hasAttribute("open")) playerOptDialog.setAttribute("open", "");
@@ -558,7 +557,7 @@ function ensureOptionsOpen() {
     playerDialogContent.appendChild(playerOptSelect);
     playerDialogContent.setAttribute("content-identifier", "player-quality");
     playerOptDialog.id = "playerDialogQuality";
-    buildQualityList(); // repopula
+    buildQualityList();
   }
 }
 
@@ -572,14 +571,14 @@ async function switchQualityProgressive(targetUrl, targetLabel) {
     s.setAttribute("selected", sel ? "true" : "false");
   });
 
-  try { video.pause(); } catch { }
+  try { video.pause(); } catch {}
   isSwitchingQuality = true;
   shouldKeepOptionsOpen = true;
   restoreDialogId = "playerDialogQuality";
   showSpinner();
 
   video.src = targetUrl;
-  try { video.load(); } catch { }
+  try { video.load(); } catch {}
 
   await new Promise((resolve) => {
     let done = false;
@@ -588,7 +587,7 @@ async function switchQualityProgressive(targetUrl, targetLabel) {
       video.removeEventListener("error", onErr);
     };
     const onMeta = () => { if (done) return; done = true; cleanup(); resolve(); };
-    const onErr = () => { if (done) return; done = true; cleanup(); resolve(); };
+    const onErr  = () => { if (done) return; done = true; cleanup(); resolve(); };
     video.addEventListener("loadedmetadata", onMeta, { once: true });
     video.addEventListener("error", onErr, { once: true });
     if (video.readyState >= 1) { cleanup(); resolve(); }
@@ -597,22 +596,20 @@ async function switchQualityProgressive(targetUrl, targetLabel) {
   try {
     const safeTime = Math.min(prevTime, Math.max(0, (video.duration || prevTime) - 0.25));
     video.currentTime = safeTime;
-  } catch { }
+  } catch {}
 
   if (wasPlaying) {
     try {
       const p = video.play();
       if (p && typeof p.then === "function") await p;
-    } catch { }
+    } catch {}
   }
   hideSpinner();
-  playerTitle.innerText = video.dataset.title || "";
-  updateToggleButton();
   ensureOptionsOpen();
-  setTimeout(() => { isSwitchingQuality = false; }, 0);
+  isSwitchingQuality = false;
 }
 
-/* hls.js loader */
+/* carregar script uma vez */
 function loadScriptOnce(src) {
   return new Promise((resolve, reject) => {
     if (document.querySelector(`script[data-src="${src}"]`)) return resolve();
@@ -625,11 +622,16 @@ function loadScriptOnce(src) {
   });
 }
 
-/* troca de qualidade — HLS via hls.js (nivéis) */
+/* HLS via hls.js */
 async function setupHls(hlsUrl) {
   isUsingHls = true;
   hlsManifestUrl = hlsUrl;
-  // Chrome/Edge/Firefox: hls.js
+
+  if (!window.Hls) {
+    try { await loadScriptOnce("https://cdn.jsdelivr.net/npm/hls.js@1.5.14/dist/hls.min.js"); }
+    catch { isUsingHls = false; video.src = hlsUrl; return; }
+  }
+
   if (window.Hls && window.Hls.isSupported()) {
     if (hls) { try { hls.destroy(); } catch {} hls = null; }
     hls = new Hls({ enableWorker: true, autoStartLoad: true });
@@ -642,18 +644,10 @@ async function setupHls(hlsUrl) {
       }
     });
   } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-    // Safari (HLS nativo)
-    video.src = hlsManifestUrl;
+    video.src = hlsManifestUrl; // Safari
   } else {
-    // tenta carregar biblioteca e repetir
-    try {
-      await loadScriptOnce("https://cdn.jsdelivr.net/npm/hls.js@1.5.14/dist/hls.min.js");
-      return setupHls(hlsUrl);
-    } catch (e) {
-      // fallback automático (sem controle de qualidade)
-      isUsingHls = false;
-      video.src = hlsUrl;
-    }
+    isUsingHls = false;
+    video.src = hlsUrl;
   }
 }
 
@@ -665,10 +659,7 @@ async function switchQualityHls(levelIndex) {
   const prevTime = video.currentTime || 0;
 
   showSpinner();
-  try {
-    hls.currentLevel = levelIndex; // troca a variante
-  } catch {}
-  // aguarda trocar buffer
+  try { hls.currentLevel = levelIndex; } catch {}
   await new Promise((r) => setTimeout(r, 250));
   try { video.currentTime = Math.max(0, prevTime - 0.05); } catch {}
   if (wasPlaying) {
@@ -681,7 +672,7 @@ async function switchQualityHls(levelIndex) {
   ensureOptionsOpen();
 }
 
-/* constrói lista de qualidades (HLS ou MP4) */
+/* construir lista de qualidade */
 function buildQualityList() {
   playerOptSelect.innerHTML = "";
 
@@ -717,7 +708,6 @@ function buildQualityList() {
     return;
   }
 
-  // MP4 progressivo
   const sources = Array.from(video.querySelectorAll("source"))
     .map((s) => ({
       label: s.getAttribute("label") || "",
@@ -758,6 +748,7 @@ function buildQualityList() {
 function openPlayerDialogQual(e) {
   if (e) { e.preventDefault(); e.stopPropagation(); }
   shouldKeepOptionsOpen = true;
+  restoreDialogId = "playerDialogQuality";
   playerDialogTitle.textContent = "Quality";
   playerDialogContent.innerHTML = "";
   playerOptSelect.innerHTML = "";
@@ -771,18 +762,18 @@ function openPlayerDialogQual(e) {
 /***************
  * Listeners
  ***************/
-toggleButton.addEventListener("click", togglePlay);
-fullScreenBtn.addEventListener("click", toggleFullScreen);
+toggleButton.addEventListener("click", (e)=>{ e.stopPropagation(); togglePlay(); });
+fullScreenBtn.addEventListener("click", (e)=>{ e.stopPropagation(); toggleFullScreen(); });
 overflowBtn.addEventListener("click", openPlayerOptions);
 playerOptClose.addEventListener("click", hidePlayerOptions);
 playerOptMisc.addEventListener("click", (e) => { e.stopPropagation(); openPlayerDialog(); openPlayerDialogMisc(); });
 playerOptQual.addEventListener("click", (e) => { e.stopPropagation(); openPlayerDialogQual(e); });
-playerOptIFrame.addEventListener("click", (e) => { e.stopPropagation(); /* abrir iFrame se você tiver */ });
+playerOptIFrame.addEventListener("click", (e) => { e.stopPropagation(); /* abrir iFrame se necessário */ });
 playerOptCloseDialog.addEventListener("click", (e) => { e.stopPropagation(); closePlayerDialog(); });
 playerOptDialog.addEventListener("click", (e) => { e.stopPropagation(); });
 playerOptCont.addEventListener("click", (e) => { e.stopPropagation(); });
 
-video.addEventListener("click", togglePlay);
+video.addEventListener("click", (e)=>{ e.stopPropagation(); togglePlay(); });
 video.addEventListener("play", () => { hideSpinner(); updateToggleButton(); });
 video.addEventListener("pause", () => { hideSpinner(); updateToggleButton(); });
 video.addEventListener("durationchange", handleDurationChange);
@@ -832,7 +823,9 @@ video.addEventListener("loadstart", function () {
   poster.style.backgroundImage = `url("${video.poster || ""}")`;
   videoPlayer.classList.remove("player-started", "player-has-error", "player-mini-mode", "hide-prev-next-btns");
   playerTitle.innerHTML = video.dataset.title || "";
-  if (!isSwitchingQuality && !shouldKeepOptionsOpen) {
+  // mantém opções/qualidade abertos durante troca
+  if (shouldKeepOptionsOpen) ensureOptionsOpen();
+  else {
     videoPlayer.classList.remove("player-options-shown");
     video.style.pointerEvents = "";
     closePlayerDialog();
@@ -857,7 +850,6 @@ function looksLikeHls(mimeType, url) {
 }
 
 async function buildSourcesFromResponse(data) {
-  // tenta detectar HLS
   let hlsUrl =
     data?.hlsManifestUrl ||
     data?.hls ||
@@ -865,14 +857,11 @@ async function buildSourcesFromResponse(data) {
     (Array.isArray(data?.formats) ? (data.formats.find(f => looksLikeHls(f.mimeType, f.url))?.url) : null);
 
   if (hlsUrl) {
-    // prepara HLS
     await setupHls(hlsUrl);
-    // storyboard
     if (data?.formats?.[0]?.url) SBVideo.src = data.formats[0].url;
     return "hls";
   }
 
-  // progressivos
   const formats = Array.isArray(data?.formats) ? data.formats : [];
   const progressive = formats.filter(f => f.url && isProgressiveMime(f.mimeType || ""));
   progressive.sort((a, b) => {
@@ -891,7 +880,6 @@ async function buildSourcesFromResponse(data) {
     video.appendChild(s);
   });
 
-  // storyboard (fallback: primeiro format)
   if (formats?.[0]?.url) SBVideo.src = formats[0].url;
 
   return "progressive";
@@ -910,6 +898,8 @@ function insertYTmPlayer(parent) {
   if (hls) { try { hls.destroy(); } catch {} hls = null; }
   isUsingHls = false;
   hlsManifestUrl = "";
+  shouldKeepOptionsOpen = false;
+  restoreDialogId = "";
   video.load();
 
   const YTmVideoId = (typeof playerVideoId !== "undefined" && playerVideoId)
@@ -934,7 +924,7 @@ Sorry about that...`;
       if (r.error) playerError.textContent = r.error + `
 
 Sorry about that...`;
-    } catch { }
+    } catch {}
     console.error("xhttpr operation error:", xhr.status);
   };
 
@@ -942,22 +932,20 @@ Sorry about that...`;
     if (xhr.status === 200) {
       try {
         const data = JSON.parse(xhr.response || "{}");
-        try { video.poster = data?.thumbnail?.[3]?.url || data?.thumbnail?.[0]?.url || ""; } catch { }
+        try { video.poster = data?.thumbnail?.[3]?.url || data?.thumbnail?.[0]?.url || ""; } catch {}
         video.dataset.title = data.title || "";
         playerTitle.innerText = video.dataset.title || "";
 
         const mode = await buildSourcesFromResponse(data);
 
         if (mode === "hls") {
-          // HLS: autostart
           hideSpinner();
           const p = video.play();
           if (p && typeof p.then === "function") p.then(() => hideSpinner()).catch(() => { hideSpinner(); updateToggleButton(); });
         } else {
-          // progressivo
           const best = video.querySelector('source[selected="true"]') || video.querySelector("source");
           if (best) video.src = best.src;
-          try { video.load(); } catch { }
+          try { video.load(); } catch {}
           const p = video.play();
           if (p && typeof p.then === "function") {
             p.then(() => hideSpinner()).catch(() => { hideSpinner(); updateToggleButton(); });
