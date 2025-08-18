@@ -1,8 +1,6 @@
-// player.js — completo, com correções de Quality + HLS + failsafe de loading
+// player.js — força 1080p quando disponível (progressivo e HLS), fallback para o maior disponível
 
-/***************
- * Setup base
- ***************/
+/*************** base ***************/
 const video = document.createElement("video");
 video.setAttribute("controls", "");
 video.preload = "auto";
@@ -313,15 +311,12 @@ playerOptIFrameText.classList.add("options-item-text");
 playerOptItem3.appendChild(playerOptIFrame);
 playerOptItem3.appendChild(playerOptIFrameText);
 
-/***************
- * Estado / helpers
- ***************/
+/*************** estado ***************/
 let controlsVisible = false;
 let coTimO = null;
 let mousedown = false;
 let scrubTime = 0;
 
-let isSwitchingQuality = false;
 let shouldKeepOptionsOpen = false;
 let restoreDialogId = "";
 
@@ -329,13 +324,14 @@ let hls = null;
 let isUsingHls = false;
 let hlsManifestUrl = "";
 
-/* Spinner failsafe */
+/* alvo de qualidade */
+const TARGET_HEIGHT = 1080;
+
+/* spinner failsafe */
 const SPINNER_FAILSAFE_MS = 12000;
 let spinnerTimer = null;
 function showSpinner() {
-  if (!videoPlayer.classList.contains("player-loading")) {
-    videoPlayer.classList.add("player-loading");
-  }
+  if (!videoPlayer.classList.contains("player-loading")) videoPlayer.classList.add("player-loading");
   if (spinnerTimer) clearTimeout(spinnerTimer);
   spinnerTimer = setTimeout(() => {
     if (video.readyState < 1) {
@@ -352,16 +348,13 @@ function hideSpinner() {
   videoPlayer.classList.remove("player-loading");
 }
 
-/* overlay controls */
+/*************** UI handlers ***************/
 controlsBG.onclick = function () {
   if (!controlsVisible) {
     controlsVisible = true;
     controlsOverlay.classList.add("controls-visible");
     if (coTimO) clearTimeout(coTimO);
-    coTimO = setTimeout(function () {
-      controlsVisible = false;
-      controlsOverlay.classList.remove("controls-visible");
-    }, 4000);
+    coTimO = setTimeout(() => { controlsVisible = false; controlsOverlay.classList.remove("controls-visible"); }, 4000);
   } else {
     controlsVisible = false;
     controlsOverlay.classList.remove("controls-visible");
@@ -369,17 +362,12 @@ controlsBG.onclick = function () {
   }
 };
 
-/* vídeo básico */
 function togglePlay() {
   if (videoPlayer.classList.contains("player-options-shown") || playerOptDialog.hasAttribute("open")) return;
   if (video.paused || video.ended) {
     const p = video.play();
-    if (p && typeof p.then === "function") {
-      p.then(() => hideSpinner()).catch(() => { hideSpinner(); updateToggleButton(); });
-    }
-  } else {
-    video.pause();
-  }
+    if (p && typeof p.then === "function") p.then(hideSpinner).catch(() => { hideSpinner(); updateToggleButton(); });
+  } else video.pause();
 }
 function toggleFullScreen() {
   if (document.webkitFullscreenElement || document.fullscreenElement) {
@@ -416,15 +404,11 @@ function updateFSButton() {
     videoPlayer.classList.remove("player-is-fullscreen");
   }
 }
-
-/* progresso */
 function handleProgress() {
   const progressPercentage = (video.currentTime / (video.duration || 1)) * 100;
   if (!mousedown) progressBar.style.flexBasis = `${progressPercentage}%`;
   const t = video.currentTime;
-  currentTime.innerHTML = (t > 3599)
-    ? new Date(1000 * t).toISOString().substr(11, 8)
-    : new Date(1000 * t).toISOString().substr(14, 5);
+  currentTime.innerHTML = (t > 3599) ? new Date(1000 * t).toISOString().substr(11, 8) : new Date(1000 * t).toISOString().substr(14, 5);
   currentTime.ariaLabel = "Current time is " + currentTime.innerHTML;
 }
 function removeScrubbingClass() {
@@ -441,9 +425,7 @@ function scrub(e) {
     scrubTime = (e.offsetX / progress.offsetWidth) * (video.duration || 0);
   }
   if (scrubTime < video.duration && scrubTime > 0) {
-    storyboardTime.innerHTML = (scrubTime > 3599)
-      ? new Date(1000 * scrubTime).toISOString().substr(11, 8)
-      : new Date(1000 * scrubTime).toISOString().substr(14, 5);
+    storyboardTime.innerHTML = (scrubTime > 3599) ? new Date(1000 * scrubTime).toISOString().substr(11, 8) : new Date(1000 * scrubTime).toISOString().substr(14, 5);
   }
   const pct = (scrubTime / (video.duration || 1)) * 100;
   progressBar.style.flexBasis = `${pct}%`;
@@ -459,8 +441,6 @@ function scrub(e) {
     video.currentTime = scrubTime;
   }
 }
-
-/* sliders/skip */
 function handleSliderUpdate() {
   video[this.name] = this.value;
   if (this.id === "playbackRate") labSliderPR.textContent = "Speed: " + this.value + "x";
@@ -476,7 +456,7 @@ function handleDurationChange() {
 }
 Array.from(skipBtns).forEach((btn) => btn.addEventListener("click", handleSkip));
 
-/* dbl tap seek */
+/* dbl tap */
 let timer, rewindSpeed = 0, forwardSpeed = 0, rewindSpeed2 = 0, forwardSpeed2 = 0;
 function updateCurrentTimeDelta(delta) {
   const isRew = delta < 0;
@@ -512,9 +492,7 @@ controlsBG.addEventListener("click", function (e) {
   timeoutDC = setTimeout(() => { clickCount = 0; }, 300);
 });
 
-/***************
- * Opções + Qualidade
- ***************/
+/*************** opções/qualidade ***************/
 function openPlayerOptions(e) {
   if (e) { e.stopPropagation(); e.preventDefault(); }
   video.style.pointerEvents = "none";
@@ -544,24 +522,14 @@ function openPlayerDialogMisc() {
   playerDialogContent.setAttribute("content-identifier", "player-misc");
   playerOptDialog.id = "playerDialogMisc";
 }
-
-/* manter opções/diálogo sempre visíveis enquanto troca */
 function ensureOptionsOpen() {
   videoPlayer.classList.add("player-options-shown");
   video.style.pointerEvents = "none";
   if (!playerOptDialog.hasAttribute("open")) playerOptDialog.setAttribute("open", "");
-  if (restoreDialogId === "playerDialogQuality") {
-    playerDialogTitle.textContent = "Quality";
-    playerDialogContent.innerHTML = "";
-    playerOptSelect.innerHTML = "";
-    playerDialogContent.appendChild(playerOptSelect);
-    playerDialogContent.setAttribute("content-identifier", "player-quality");
-    playerOptDialog.id = "playerDialogQuality";
-    buildQualityList();
-  }
+  if (restoreDialogId === "playerDialogQuality") { openPlayerDialogQual(); }
 }
 
-/* troca de qualidade — MP4 progressivo */
+/* troca progressivo */
 async function switchQualityProgressive(targetUrl, targetLabel) {
   const wasPlaying = !video.paused && !video.ended;
   const prevTime = video.currentTime || 0;
@@ -572,7 +540,6 @@ async function switchQualityProgressive(targetUrl, targetLabel) {
   });
 
   try { video.pause(); } catch {}
-  isSwitchingQuality = true;
   shouldKeepOptionsOpen = true;
   restoreDialogId = "playerDialogQuality";
   showSpinner();
@@ -593,23 +560,13 @@ async function switchQualityProgressive(targetUrl, targetLabel) {
     if (video.readyState >= 1) { cleanup(); resolve(); }
   });
 
-  try {
-    const safeTime = Math.min(prevTime, Math.max(0, (video.duration || prevTime) - 0.25));
-    video.currentTime = safeTime;
-  } catch {}
-
-  if (wasPlaying) {
-    try {
-      const p = video.play();
-      if (p && typeof p.then === "function") await p;
-    } catch {}
-  }
+  try { video.currentTime = Math.min(prevTime, Math.max(0, (video.duration || prevTime) - 0.25)); } catch {}
+  if (wasPlaying) { try { await video.play(); } catch {} }
   hideSpinner();
   ensureOptionsOpen();
-  isSwitchingQuality = false;
 }
 
-/* carregar script uma vez */
+/* helpers lib externa */
 function loadScriptOnce(src) {
   return new Promise((resolve, reject) => {
     if (document.querySelector(`script[data-src="${src}"]`)) return resolve();
@@ -622,7 +579,7 @@ function loadScriptOnce(src) {
   });
 }
 
-/* HLS via hls.js */
+/* HLS */
 async function setupHls(hlsUrl) {
   isUsingHls = true;
   hlsManifestUrl = hlsUrl;
@@ -635,6 +592,19 @@ async function setupHls(hlsUrl) {
   if (window.Hls && window.Hls.isSupported()) {
     if (hls) { try { hls.destroy(); } catch {} hls = null; }
     hls = new Hls({ enableWorker: true, autoStartLoad: true });
+
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      // forçar 1080p se existir; senão, maior disponível
+      try {
+        const idx = pickHlsLevelIndexByHeight(hls.levels, TARGET_HEIGHT);
+        if (idx != null) {
+          hls.autoLevelEnabled = false;
+          hls.currentLevel = idx;
+        }
+      } catch {}
+      try { video.play()?.catch(()=>{}); } catch {}
+    });
+
     hls.loadSource(hlsManifestUrl);
     hls.attachMedia(video);
     hls.on(Hls.Events.ERROR, (e, data) => {
@@ -644,11 +614,29 @@ async function setupHls(hlsUrl) {
       }
     });
   } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-    video.src = hlsManifestUrl; // Safari
+    // Safari nativo: o browser decide o nível (não há API pra fixar 1080p nativamente)
+    video.src = hlsManifestUrl;
   } else {
     isUsingHls = false;
     video.src = hlsUrl;
   }
+}
+
+function pickHlsLevelIndexByHeight(levels, targetHeight) {
+  if (!Array.isArray(levels) || !levels.length) return null;
+  let exact = levels.findIndex(l => (l.height|0) === targetHeight);
+  if (exact >= 0) return exact;
+  // maior abaixo do alvo
+  let bestBelow = -1; let bestH = -1;
+  levels.forEach((l, i) => {
+    const h = l.height|0;
+    if (h <= targetHeight && h > bestH) { bestH = h; bestBelow = i; }
+  });
+  if (bestBelow >= 0) return bestBelow;
+  // se não houver abaixo, pega o maior de todos
+  let maxH = -1; let maxIdx = 0;
+  levels.forEach((l, i) => { const h = l.height|0; if (h > maxH) { maxH = h; maxIdx = i; } });
+  return maxIdx;
 }
 
 async function switchQualityHls(levelIndex) {
@@ -657,22 +645,16 @@ async function switchQualityHls(levelIndex) {
   restoreDialogId = "playerDialogQuality";
   const wasPlaying = !video.paused && !video.ended;
   const prevTime = video.currentTime || 0;
-
   showSpinner();
-  try { hls.currentLevel = levelIndex; } catch {}
+  try { hls.autoLevelEnabled = false; hls.currentLevel = levelIndex; } catch {}
   await new Promise((r) => setTimeout(r, 250));
   try { video.currentTime = Math.max(0, prevTime - 0.05); } catch {}
-  if (wasPlaying) {
-    try {
-      const p = video.play();
-      if (p && typeof p.then === "function") await p;
-    } catch {}
-  }
+  if (wasPlaying) { try { await video.play(); } catch {} }
   hideSpinner();
   ensureOptionsOpen();
 }
 
-/* construir lista de qualidade */
+/* montar lista Qualidade */
 function buildQualityList() {
   playerOptSelect.innerHTML = "";
 
@@ -726,11 +708,9 @@ function buildQualityList() {
     const btn = document.createElement("button");
     btn.classList.add("controls-button", "player-select-button", "has-ripple");
     btn.title = item.selected ? `${item.label} (Selected)` : item.label || "Unknown";
-    btn.ariaLabel = btn.title;
-    btn.innerHTML = btn.title;
+    btn.ariaLabel = btn.title; btn.innerHTML = btn.title;
     btn.ariaPressed = item.selected ? "true" : "false";
-    btn.dataset.src = item.url;
-    btn.dataset.label = item.label || "";
+    btn.dataset.src = item.url; btn.dataset.label = item.label || "";
     btn.addEventListener("click", async (ev) => {
       ev.preventDefault(); ev.stopPropagation();
       await switchQualityProgressive(btn.dataset.src, btn.dataset.label);
@@ -759,16 +739,14 @@ function openPlayerDialogQual(e) {
   openPlayerDialog();
 }
 
-/***************
- * Listeners
- ***************/
+/*************** listeners ***************/
 toggleButton.addEventListener("click", (e)=>{ e.stopPropagation(); togglePlay(); });
 fullScreenBtn.addEventListener("click", (e)=>{ e.stopPropagation(); toggleFullScreen(); });
 overflowBtn.addEventListener("click", openPlayerOptions);
 playerOptClose.addEventListener("click", hidePlayerOptions);
 playerOptMisc.addEventListener("click", (e) => { e.stopPropagation(); openPlayerDialog(); openPlayerDialogMisc(); });
 playerOptQual.addEventListener("click", (e) => { e.stopPropagation(); openPlayerDialogQual(e); });
-playerOptIFrame.addEventListener("click", (e) => { e.stopPropagation(); /* abrir iFrame se necessário */ });
+playerOptIFrame.addEventListener("click", (e) => { e.stopPropagation(); /* abrir iFrame se quiser */ });
 playerOptCloseDialog.addEventListener("click", (e) => { e.stopPropagation(); closePlayerDialog(); });
 playerOptDialog.addEventListener("click", (e) => { e.stopPropagation(); });
 playerOptCont.addEventListener("click", (e) => { e.stopPropagation(); });
@@ -823,13 +801,8 @@ video.addEventListener("loadstart", function () {
   poster.style.backgroundImage = `url("${video.poster || ""}")`;
   videoPlayer.classList.remove("player-started", "player-has-error", "player-mini-mode", "hide-prev-next-btns");
   playerTitle.innerHTML = video.dataset.title || "";
-  // mantém opções/qualidade abertos durante troca
   if (shouldKeepOptionsOpen) ensureOptionsOpen();
-  else {
-    videoPlayer.classList.remove("player-options-shown");
-    video.style.pointerEvents = "";
-    closePlayerDialog();
-  }
+  else { videoPlayer.classList.remove("player-options-shown"); video.style.pointerEvents = ""; closePlayerDialog(); }
   closeIFramePlayer();
 });
 video.addEventListener("waiting", showSpinner);
@@ -838,22 +811,16 @@ video.addEventListener("playing", function () {
   hideSpinner();
 });
 
-/***************
- * Backend → carregar fontes
- ***************/
-function isProgressiveMime(mimeType) {
-  return /video\/mp4|video\/webm/i.test(mimeType || "");
-}
+/*************** backend -> fontes ***************/
+function isProgressiveMime(mimeType) { return /video\/mp4|video\/webm/i.test(mimeType || ""); }
 function looksLikeHls(mimeType, url) {
-  return /application\/vnd\.apple\.mpegurl|application\/x-mpegURL/i.test(mimeType || "")
-    || (url && /\.m3u8(\?|$)/i.test(url));
+  return /application\/vnd\.apple\.mpegurl|application\/x-mpegURL/i.test(mimeType || "") || (url && /\.m3u8(\?|$)/i.test(url));
 }
 
 async function buildSourcesFromResponse(data) {
   let hlsUrl =
     data?.hlsManifestUrl ||
-    data?.hls ||
-    data?.hlsUrl ||
+    data?.hls || data?.hlsUrl ||
     (Array.isArray(data?.formats) ? (data.formats.find(f => looksLikeHls(f.mimeType, f.url))?.url) : null);
 
   if (hlsUrl) {
@@ -864,6 +831,8 @@ async function buildSourcesFromResponse(data) {
 
   const formats = Array.isArray(data?.formats) ? data.formats : [];
   const progressive = formats.filter(f => f.url && isProgressiveMime(f.mimeType || ""));
+
+  // ordenar por altura (qualityLabel)
   progressive.sort((a, b) => {
     const na = parseInt((a.qualityLabel || "").replace(/[^\d]/g, "")) || 0;
     const nb = parseInt((b.qualityLabel || "").replace(/[^\d]/g, "")) || 0;
@@ -871,17 +840,20 @@ async function buildSourcesFromResponse(data) {
   });
 
   video.innerHTML = ``;
-  progressive.forEach((item, idx) => {
+
+  // procurar 1080p; senão, melhor abaixo
+  let pick = progressive.find(f => /1080/.test(f.qualityLabel || "")) || progressive[0];
+
+  progressive.forEach((item) => {
     const s = document.createElement("source");
     s.src = item.url;
     s.type = item.mimeType || "video/mp4";
     s.setAttribute("label", item.qualityLabel || "");
-    s.setAttribute("selected", idx === 0 ? "true" : "false");
+    s.setAttribute("selected", item === pick ? "true" : "false");
     video.appendChild(s);
   });
 
   if (formats?.[0]?.url) SBVideo.src = formats[0].url;
-
   return "progressive";
 }
 
@@ -939,30 +911,23 @@ Sorry about that...`;
         const mode = await buildSourcesFromResponse(data);
 
         if (mode === "hls") {
+          // hls.js MANIFEST_PARSED já tenta travar 1080p
           hideSpinner();
           const p = video.play();
-          if (p && typeof p.then === "function") p.then(() => hideSpinner()).catch(() => { hideSpinner(); updateToggleButton(); });
+          if (p && typeof p.then === "function") p.then(hideSpinner).catch(() => { hideSpinner(); updateToggleButton(); });
         } else {
-          const best = video.querySelector('source[selected="true"]') || video.querySelector("source");
-          if (best) video.src = best.src;
+          // progressivo: já escolhemos 1080p (ou melhor disponível)
+          const sel = video.querySelector('source[selected="true"]') || video.querySelector("source");
+          if (sel) video.src = sel.src;
           try { video.load(); } catch {}
           const p = video.play();
-          if (p && typeof p.then === "function") {
-            p.then(() => hideSpinner()).catch(() => { hideSpinner(); updateToggleButton(); });
-          } else {
-            hideSpinner();
-          }
+          if (p && typeof p.then === "function") p.then(hideSpinner).catch(() => { hideSpinner(); updateToggleButton(); });
         }
-      } catch (e) {
-        xhr.onerror();
-      }
-    } else {
-      xhr.onerror();
-    }
+      } catch (e) { xhr.onerror(); }
+    } else { xhr.onerror(); }
   };
 
   xhr.send();
 }
 
-/* expõe para o app */
 window.insertYTmPlayer = window.insertYTmPlayer || insertYTmPlayer;
